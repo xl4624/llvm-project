@@ -118,7 +118,7 @@ private:
   // Emits C++ statements for matching a variadic operand.
   void emitVariadicOperandMatch(DagNode tree, DagNode variadicArgTree,
                                 StringRef opName, int argIndex,
-                                int &operandIndex, int depth);
+                                int operandIndex, int depth);
 
   // Emits C++ statements for matching the `argIndex`-th argument of the given
   // DAG `tree` as an attribute.
@@ -273,19 +273,19 @@ public:
 
   // Determine if we should inline the match logic or delegate to a static
   // function.
-  bool useStaticMatcher(DagNode node) {
+  bool useStaticMatcher(DagNode node) const {
     // either/variadic node must be associated to the parentOp, thus we can't
     // emit a static matcher rooted at them.
     if (node.isEither() || node.isVariadic())
       return false;
 
-    return refStats[node] > kStaticMatcherThreshold;
+    return refStats.lookup(node) > kStaticMatcherThreshold;
   }
 
   // Get the name of the static DAG matcher function corresponding to the node.
-  std::string getMatcherName(DagNode node) {
+  std::string getMatcherName(DagNode node) const {
     assert(useStaticMatcher(node));
-    return matcherNames[node];
+    return matcherNames.lookup(node);
   }
 
   // Get the name of static type/attribute verification function.
@@ -601,17 +601,17 @@ void PatternEmitter::emitOpMatch(DagNode tree, StringRef opName, int depth) {
   if (!name.empty())
     os << formatv("{0} = {1};\n", name, castedName);
 
-  for (int i = 0, opArgIdx = 0, e = tree.getNumArgs(), nextOperand = 0; i != e;
-       ++i, ++opArgIdx) {
-    auto opArg = op.getArg(opArgIdx);
+  for (int i = 0, argIndex = 0, e = tree.getNumArgs(), operandIndex = 0; i != e;
+       ++i, ++argIndex) {
+    auto opArg = op.getArg(argIndex);
     std::string argName = formatv("op{0}", depth + 1);
 
     // Handle nested DAG construct first
     if (DagNode argTree = tree.getArgAsNestedDag(i)) {
       if (argTree.isEither()) {
-        emitEitherOperandMatch(tree, argTree, castedName, opArgIdx, nextOperand,
-                               depth);
-        ++opArgIdx;
+        emitEitherOperandMatch(tree, argTree, castedName, argIndex,
+                               operandIndex, depth);
+        ++argIndex;
         continue;
       }
       if (auto *operand = llvm::dyn_cast_if_present<NamedTypeConstraint *>(opArg)) {
@@ -619,18 +619,18 @@ void PatternEmitter::emitOpMatch(DagNode tree, StringRef opName, int depth) {
           if (!operand->isVariadic()) {
             auto error = formatv("variadic DAG construct can't match op {0}'s "
                                  "non-variadic operand #{1}",
-                                 op.getOperationName(), opArgIdx);
+                                 op.getOperationName(), argIndex);
             PrintFatalError(loc, error);
           }
-          emitVariadicOperandMatch(tree, argTree, castedName, opArgIdx,
-                                   nextOperand, depth);
-          ++nextOperand;
+          emitVariadicOperandMatch(tree, argTree, castedName, argIndex,
+                                   operandIndex, depth);
+          ++operandIndex;
           continue;
         }
         if (operand->isVariableLength()) {
           auto error = formatv("use nested DAG construct to match op {0}'s "
                                "variadic operand #{1} unsupported now",
-                               op.getOperationName(), opArgIdx);
+                               op.getOperationName(), argIndex);
           PrintFatalError(loc, error);
         }
       }
@@ -642,12 +642,12 @@ void PatternEmitter::emitOpMatch(DagNode tree, StringRef opName, int depth) {
       os.indent() << formatv(
           "auto *{0} = "
           "(*{1}.getODSOperands({2}).begin()).getDefiningOp();\n",
-          argName, castedName, nextOperand);
+          argName, castedName, operandIndex);
       // Null check of operand's definingOp
       emitMatchCheck(
           castedName, /*matchStr=*/argName,
           formatv("\"There's no operation that defines operand {0} of {1}\"",
-                  nextOperand++, castedName));
+                  operandIndex++, castedName));
       emitMatch(argTree, argName, depth + 1);
       os << formatv("tblgen_ops.push_back({0});\n", argName);
       os.unindent() << "}\n";
@@ -657,14 +657,14 @@ void PatternEmitter::emitOpMatch(DagNode tree, StringRef opName, int depth) {
     // Next handle DAG leaf: operand or attribute
     if (isa<NamedTypeConstraint *>(opArg)) {
       auto operandName =
-          formatv("{0}.getODSOperands({1})", castedName, nextOperand);
-      emitOperandMatch(tree, castedName, operandName.str(), nextOperand,
+          formatv("{0}.getODSOperands({1})", castedName, operandIndex);
+      emitOperandMatch(tree, castedName, operandName.str(), operandIndex,
                        /*operandMatcher=*/tree.getArgAsLeaf(i),
-                       /*argName=*/tree.getArgName(i), opArgIdx,
+                       /*argName=*/tree.getArgName(i), argIndex,
                        /*variadicSubIndex=*/std::nullopt);
-      ++nextOperand;
+      ++operandIndex;
     } else if (isa<NamedAttribute *>(opArg)) {
-      emitAttributeMatch(tree, castedName, opArgIdx, depth);
+      emitAttributeMatch(tree, castedName, argIndex, depth);
     } else {
       PrintFatalError(loc, "unhandled case when matching op");
     }
@@ -806,7 +806,7 @@ void PatternEmitter::emitEitherOperandMatch(DagNode tree, DagNode eitherArgTree,
 void PatternEmitter::emitVariadicOperandMatch(DagNode tree,
                                               DagNode variadicArgTree,
                                               StringRef opName, int argIndex,
-                                              int &operandIndex, int depth) {
+                                              int operandIndex, int depth) {
   Operator &op = tree.getDialectOp(opMap);
 
   os << "{\n";
